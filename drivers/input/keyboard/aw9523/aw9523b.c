@@ -121,13 +121,15 @@ struct aw9523b_data {
     int gpio_rst;
     int gpio_caps_led;
     int gpio_irq;
+    unsigned char have_suspend;
     struct delayed_work work;
     struct work_struct fb_notify_work;
 	struct notifier_block pm_notif;
 	bool resume_in_workqueue;
 };
 
-static struct aw9523b_data *g_aw9523_data;
+
+static u8 capslock_led_enable = 0;
 
 #define AW9523B_VIO_MIN_UV       (1800000)
 #define AW9523B_VIO_MAX_UV       (1800000)
@@ -136,25 +138,26 @@ static u8  aw9523b_chip_id = 0;
 
 static struct drm_panel *active_panel;
 
-static struct input_dev *aw9523b_input_dev;
+static struct aw9523b_data *g_aw9523_data=NULL;
+static struct input_dev *aw9523b_input_dev = NULL;
 static struct i2c_client *g_client = NULL;
 
 static const unsigned short  key_array[Y_NUM][X_NUM] = {
-	{ KEY_F1,        KEY_H,         KEY_B,          KEY_7,        KEY_UP,        KEY_ENTER,  KEY_Y,     KEY_COMMA       },
+	{ 0xFFFF,        KEY_H,         KEY_B,          KEY_7,        KEY_UP,        KEY_ENTER,  KEY_Y,     KEY_COMMA       },
 	{ KEY_3,         KEY_S,         KEY_Z,          KEY_M,        KEY_I,         KEY_9,      KEY_W,     KEY_J           },
 	{ KEY_LEFT,      KEY_G,         KEY_V,          KEY_6,        KEY_RIGHT,     KEY_DELETE, KEY_T,     KEY_DOT         },
 	{ KEY_SYM,       KEY_A,         KEY_RIGHTBRACE, KEY_HOMEPAGE, KEY_P,         KEY_MINUS,  KEY_Q,     KEY_L           },
 	{ KEY_BACKSPACE, KEY_D,         KEY_X,          KEY_K,        KEY_SEMICOLON, KEY_EQUAL,  KEY_E,     KEY_APOSTROPHE  },
 	{ KEY_CAPSLOCK,  KEY_BACKSLASH, KEY_LEFTBRACE,  KEY_DOWN,     KEY_O,         KEY_0,      KEY_GRAVE, KEY_K           },
 	{ KEY_SPACE,     KEY_F,         KEY_C,          KEY_N,        KEY_U,         KEY_8,      KEY_R,     KEY_5           },
-	{ KEY_ESC,      KEY_1,         0xFF,           0xFF,         KEY_2,         KEY_4,      KEY_TAB,   0xFF            }
+	{ KEY_ESC,      KEY_1,         0xFFFF,           0xFFFF,         KEY_2,         KEY_4,      KEY_TAB,   0xFFFF            }
 };
 
 // This macro sets the interval between polls of the key matrix for ghosted keys (in milliseconds).
 // Note that polling only happens while one key is already pressed, to scan the matrix for keys in the same row.
 #define POLL_INTERVAL (15)
 
-#define P1_DEFAULT_VALUE (0) /*p1”√¿¥ ‰≥ˆ£¨’‚∏ˆ÷µ «p1µƒ≥ı º÷µ*/
+#define P1_DEFAULT_VALUE (0) /*p1Áî®Êù•ËæìÂá∫ÔºåËøô‰∏™ÂÄºÊòØp1ÁöÑÂàùÂßãÂÄº*/
 
 static int aw9523b_i2c_read(struct i2c_client *client, char *writebuf,
                int writelen, char *readbuf, int readlen)
@@ -407,7 +410,6 @@ static void aw9523b_work_func(struct work_struct *work)
 
 	struct aw9523b_data *pdata = NULL;
 	u16 keycode = 0xFF;
-	static u8 capslock_led_enable = 0;
 	int i, j, k;
 	u8 keymask = 0;
 
@@ -425,6 +427,7 @@ static void aw9523b_work_func(struct work_struct *work)
 		state[i] = ~aw9523b_get_P0_value();
 	}
 
+		aw9523b_write_reg(0x30,0x38);
 	// Scan the matrix again to verify there was no state change during the scan, as this could mess with the anti-ghosting.
 	for (i = 0; i < Y_NUM; i++) {
 		aw9523b_write_reg(CONFIG_PORT1, ~(1 << i));
@@ -469,16 +472,26 @@ static void aw9523b_work_func(struct work_struct *work)
 						gpio_direction_output(pdata->gpio_caps_led, 1);
 					capslock_led_enable++;
 				}
-				input_report_key(aw9523b_input_dev, keycode, 1);
-				AW9523_LOG("(press) keycode = %d \n", keycode);
+
+                if(keycode != 0xFFFF)
+                {
+                    AW9523_LOG("(press) keycode = %d \n", keycode);
+				    input_report_key(aw9523b_input_dev, keycode, 1);
+                }
+
+
 			} else if (!(state[i] & (1 << j)) && down[i] & (1 << j)) { // Keyrelease.
 				down[i] &= ~(1 << j);
 				if (capslock_led_enable >= 2) {
 					gpio_direction_output(pdata->gpio_caps_led, 0);
 					capslock_led_enable = 0;
 				}
-				input_report_key(aw9523b_input_dev, keycode, 0);
-				AW9523_LOG("(released) keycode = %d \n", keycode);
+
+                if(keycode != 0xFFFF)
+                {
+                    AW9523_LOG("(released) keycode = %d \n", keycode);
+				    input_report_key(aw9523b_input_dev, keycode, 0);
+                }
 			}
 			next:;
 		}
@@ -600,6 +613,7 @@ static int aw9523b_create_attr(struct device_driver *driver)
 
 static struct platform_driver aw9523b_pdrv;
 #endif
+
 static int register_aw9523b_input_dev(struct device *pdev)
 {
     int i,j;
@@ -608,28 +622,32 @@ static int register_aw9523b_input_dev(struct device *pdev)
     AW9523_FUN(f);
 
     aw9523b_input_dev = input_allocate_device();
+    //aw9523b_input_dev = devm_input_allocate_device(pdev);
     if (!aw9523b_input_dev)
-        return -ENOMEM;
+    {
+	    printk("aw9523b_input_dev alloct failed\n");
+	    return -ENOMEM;
+    }
 
     aw9523b_input_dev->name = "Fxtec Pro1";
-    aw9523b_input_dev->id.bustype = BUS_HOST;
-    aw9523b_input_dev->id.vendor = 0x0;
-    aw9523b_input_dev->id.product = 0x0;
-    aw9523b_input_dev->id.version = 0x0;
+    aw9523b_input_dev->id.bustype = BUS_I2C;
+    aw9523b_input_dev->id.vendor = 0x9523;
+    aw9523b_input_dev->id.product = 0x0701;
+    aw9523b_input_dev->id.version = 0x0001;
 
     __set_bit(EV_KEY, aw9523b_input_dev->evbit);
 
 	for (i=0;i<X_NUM;i++)
 		for (j=0;j<Y_NUM;j++)
-			if (key_array[i][j]!=0xff)
+			if (key_array[i][j]!=0xffff)
 				input_set_capability(aw9523b_input_dev, EV_KEY, key_array[i][j]);
 
 
     aw9523b_input_dev->dev.parent = pdev;
     //r = input_register_device(aw9523b_input_dev);
     //if (r) {
-    //    input_free_device(aw9523b_input_dev);
-    //    return r;
+	//    input_free_device(aw9523b_input_dev);
+	//    return r;
     //}
     return 0;
 }
@@ -756,7 +774,7 @@ static int aw9523b_parse_dt(struct device *dev,
 
 	pinctrl_select_state(pdata->aw9523_ctrl, pdata->aw9523_int_active);
 
-    //TODO ∏¥ŒªGPIO Œﬁ∑®≤Ÿ◊˜£¨”√pinctrl∑Ω Ωøÿ÷∆
+    //TODO Â§ç‰ΩçGPIO Êó†Ê≥ïÊìç‰ΩúÔºåÁî®pinctrlÊñπÂºèÊéßÂà∂
     #if 0
     pdata->gpio_rst = of_get_named_gpio(np, "awinic,reset-gpio", 0);
     if (gpio_is_valid(pdata->gpio_rst)) {
@@ -827,14 +845,31 @@ static int aw9523b_parse_dt(struct device *dev,
 static int aw9523b_suspend(struct device *dev)
 {
     struct aw9523b_data *data = dev_get_drvdata(dev);
-    int err;
+    //int err;
 
-    err = aw9523b_hw_reset(data);
-    if(err == 0xff)
+    dev_err(&data->client->dev, "%s start have_suspend = %d \n", __func__,data->have_suspend);
+
+    if(data->have_suspend == 0)
     {
-        err = -EINVAL;
-        printk("%s reset error\n",__func__);
-        return err;
+        /*
+        err = aw9523b_hw_reset(data);
+        if(err == 0xff)
+        {
+            err = -EINVAL;
+            printk("%s reset error\n",__func__);
+            return err;
+        }
+        */
+        cancel_delayed_work_sync(&data->work);
+        disable_irq(data->client->irq);
+        pinctrl_select_state(data->aw9523_ctrl, data->aw9523_rst_l);
+
+        data->have_suspend = 1;
+        dev_err(&data->client->dev, "capslock_led_enable = %d have_suspend = %d\n",
+            capslock_led_enable,data->have_suspend);
+        if (capslock_led_enable == 1 ) {
+            gpio_direction_output(data->gpio_caps_led, 0);
+        }
     }
 	return 0;
 }
@@ -843,23 +878,45 @@ static int aw9523b_resume(struct device *dev)
 {
 	struct aw9523b_data *data = dev_get_drvdata(dev);
 	int err,devic_id;
-	printk("%s begin\n",__func__);
+	dev_err(&data->client->dev, "%s start have_suspend = %d \n", __func__,data->have_suspend);
 
-	devic_id = aw9523b_i2c_test(data);
-	if(devic_id < 0)
-	{
-		printk("%s aw9523b_i2c_test error\n",__func__);
-		err = aw9523b_hw_reset(data);
-		if(err == 0xff)
-		{
-			err = -EINVAL;
-			printk("%s reset error\n",__func__);
-			return err;
-		}
-	}
-	default_p0_p1_settings();     //io_init
-	aw9523b_get_P0_value();
-	aw9523b_get_P1_value();
+    if(data->have_suspend)
+    {
+        err = aw9523b_hw_reset(data);
+        if(err == 0xff)
+        {
+        err = -EINVAL;
+        printk("%s reset error\n",__func__);
+        return err;
+        }
+
+        devic_id = aw9523b_i2c_test(data);
+
+        if(devic_id < 0)
+        {
+            printk("%s aw9523b_i2c_test error\n",__func__);
+            err = aw9523b_hw_reset(data);
+            if(err == 0xff)
+            {
+                err = -EINVAL;
+                printk("%s reset error\n",__func__);
+                return err;
+            }
+        }
+
+        dev_err(&data->client->dev, "capslock_led_enable = %d\n", capslock_led_enable);
+        if (capslock_led_enable == 1) {
+            gpio_direction_output(data->gpio_caps_led, 1);
+        }
+
+        default_p0_p1_settings();     //io_init
+        aw9523b_get_P0_value();
+        aw9523b_get_P1_value();
+        udelay(50);
+        enable_irq(data->client->irq);
+        udelay(10);
+        data->have_suspend = 0;
+    }
 	return 0;
 }
 
@@ -977,10 +1034,13 @@ static int aw9523b_check_dt(struct device_node *np)
 {
 	int i;
 	int count;
+
+
 	struct device_node *node;
 	struct drm_panel *panel;
 
-	//–Ë“™‘⁄∆¡dts≥ı ºªØ∫Û≤≈ƒ‹’“µΩpanelµƒ◊÷∂Œ
+
+	//ÈúÄË¶ÅÂú®Â±èdtsÂàùÂßãÂåñÂêéÊâçËÉΩÊâæÂà∞panelÁöÑÂ≠óÊÆµ
 	count = of_count_phandle_with_args(np, "panel", NULL);
 
 	if (count <= 0)
@@ -1053,10 +1113,11 @@ static int aw9523b_probe(struct i2c_client *client,
     int err = 0;
     int devic_id = 0;
 
-    struct aw9523b_data *pdata;
+    struct aw9523b_data *pdata=NULL;
 
 
-    printk("%s begin\n",__func__);
+
+    pr_err("hjc++ %s begin\n",__func__);
     if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
         dev_err(&client->dev, "i2c_check_functionality error\n");
         err = -EPERM;
@@ -1068,6 +1129,7 @@ static int aw9523b_probe(struct i2c_client *client,
         goto exit;
     }
 
+    memset(pdata, 0, sizeof(struct aw9523b_data));
     g_aw9523_data = pdata;
 
     if (client->dev.of_node) {
@@ -1098,7 +1160,7 @@ static int aw9523b_probe(struct i2c_client *client,
     if (err) {
         dev_err(&client->dev, "Failed to get aw9523b regulators\n");
         err = -EINVAL;
-        goto free_input_dev;
+        goto free_i2c_clientdata_exit;
     }
     err = aw9523b_power_ctl(pdata, true);
     if (err) {
@@ -1131,7 +1193,7 @@ static int aw9523b_probe(struct i2c_client *client,
     if (err) {
         dev_err(&client->dev, "Failed to get aw9523b regulators\n");
         err = -EINVAL;
-        goto free_i2c_clientdata_exit;
+        goto deinit_power_exit;
     }
 
  //   err = sysfs_create_group(&client->dev.kobj, &aw9523b_attr_grp);
@@ -1153,31 +1215,30 @@ static int aw9523b_probe(struct i2c_client *client,
             IRQ_TYPE_EDGE_FALLING,
             client->name, pdata);
 
-	printk("request_threaded_irq %d\n",err);
     //schedule_delayed_work(&pdata->keypad_work, 0);
  	//aw9523b_irq_enable(pdata);
-    printk("%s exit success\n",__func__);
 
     INIT_WORK(&pdata->fb_notify_work, fb_notify_resume_work);
 
-	if (err)
-		dev_err(&client->dev, "Unable to register fb_notifier: %d\n",
-			err);
+    printk("hjc-- %s exit success\n",__func__);
+
     return 0;
 
 //exit_remove_sysfs:
 //    sysfs_remove_group(&client->dev.kobj, &aw9523b_attr_grp);
+//free_input_dev:
+    //input_free_device(aw9523b_input_dev);
 deinit_power_exit:
     aw9523b_power_deinit(pdata);
-free_input_dev:
-    input_free_device(aw9523b_input_dev);
-pdata_free_exit:
-    if (pdata && (client->dev.of_node))
-        devm_kfree(&client->dev, pdata);
+    //if (pdata && (client->dev.of_node))
+        //devm_kfree(&client->dev, pdata);
 free_i2c_clientdata_exit:
     i2c_set_clientdata(client, NULL);
+pdata_free_exit:
 kfree_exit:
     kfree(pdata);
+	g_aw9523_data = NULL;
+
 exit:
     return err;
 }
@@ -1197,6 +1258,45 @@ static int aw9523b_remove(struct i2c_client *client)
     return 0;
 }
 
+static const struct i2c_device_id aw9523b_id[] = {
+    { AWINIC_NAME, 0 },
+    { }
+};
+
+MODULE_DEVICE_TABLE(i2c, aw9523b_id);
+
+static const struct of_device_id aw9523b_of_match[] = {
+    { .compatible = "awinic,aw9523b", },
+    { },
+};
+
+static struct i2c_driver aw9523b_driver = {
+    .driver = {
+        .owner  = THIS_MODULE,
+        .name   = AWINIC_NAME,
+        .of_match_table = aw9523b_of_match,
+    },
+    .id_table   = aw9523b_id,
+    .probe      = aw9523b_probe,
+    .remove     = aw9523b_remove,
+};
+
+static int __init AW9523B_init(void)
+{
+    return i2c_add_driver(&aw9523b_driver);
+}
+
+static void __exit AW9523B_exit(void)
+{
+    i2c_del_driver(&aw9523b_driver);
+}
+
+MODULE_AUTHOR("contact@AWINIC TECHNOLOGY");
+MODULE_DESCRIPTION("AW9523B LED OF GPIO DRIVER");
+MODULE_LICENSE("GPL v2");
+
+module_init(AW9523B_init);
+module_exit(AW9523B_exit);
 /*
  * SYSFS interface for enabling/disabling keys and switches:
  *
@@ -2081,7 +2181,10 @@ static int gpio_keys_probe(struct platform_device *pdev)
 
 	device_init_wakeup(dev, wakeup);
 
-    aw9523_register_powermanger(g_aw9523_data);
+    if(g_aw9523_data != NULL)
+    {
+        aw9523_register_powermanger(g_aw9523_data);
+    }
 
 	return 0;
 }
@@ -2242,51 +2345,12 @@ static int __init gpio_keys_init(void)
 
 static void __exit gpio_keys_exit(void)
 {
-    aw9523_unregister_powermanger(g_aw9523_data);
+    if(g_aw9523_data != NULL)
+    {
+        aw9523_unregister_powermanger(g_aw9523_data);
+    }
 	platform_driver_unregister(&gpio_keys_device_driver);
 }
 
 late_initcall(gpio_keys_init);
 module_exit(gpio_keys_exit);
-
-
-static const struct i2c_device_id aw9523b_id[] = {
-    { AWINIC_NAME, 0 },
-    { }
-};
-
-MODULE_DEVICE_TABLE(i2c, aw9523b_id);
-
-static const struct of_device_id aw9523b_of_match[] = {
-    { .compatible = "awinic,aw9523b", },
-    { },
-};
-
-static struct i2c_driver aw9523b_driver = {
-    .driver = {
-        .owner  = THIS_MODULE,
-        .name   = AWINIC_NAME,
-        .of_match_table = aw9523b_of_match,
-    },
-    .id_table   = aw9523b_id,
-    .probe      = aw9523b_probe,
-    .remove     = aw9523b_remove,
-};
-
-static int __init AW9523B_init(void)
-{
-    return i2c_add_driver(&aw9523b_driver);
-}
-
-static void __exit AW9523B_exit(void)
-{
-    i2c_del_driver(&aw9523b_driver);
-}
-
-MODULE_AUTHOR("contact@AWINIC TECHNOLOGY");
-MODULE_DESCRIPTION("AW9523B LED OF GPIO DRIVER");
-MODULE_LICENSE("GPL v2");
-
-module_init(AW9523B_init);
-module_exit(AW9523B_exit);
-

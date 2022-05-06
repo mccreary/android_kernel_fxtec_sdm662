@@ -3692,19 +3692,28 @@ static int smblib_get_prop_ufp_mode(struct smb_charger *chg)
 	}
 	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_1 = 0x%02x\n", stat);
 
+ /* config 0x154A to 0x17 */
+    if (stat & (SNK_RP_STD_DAM_BIT | SNK_RP_1P5_DAM_BIT | SNK_RP_3P0_DAM_BIT)){
+        smblib_masked_write(chg, TYPE_C_DEBUG_ACCESS_SINK_REG,
+        TYPEC_DEBUG_ACCESS_SINK_MASK, 0x17);
+    }
+
 	switch (stat & DETECTED_SRC_TYPE_MASK) {
 	case SNK_RP_STD_BIT:
+	case SNK_RP_STD_DAM_BIT:
 		return POWER_SUPPLY_TYPEC_SOURCE_DEFAULT;
 	case SNK_RP_1P5_BIT:
+	case SNK_RP_1P5_DAM_BIT:
 		return POWER_SUPPLY_TYPEC_SOURCE_MEDIUM;
 	case SNK_RP_3P0_BIT:
+	case SNK_RP_3P0_DAM_BIT:
 		return POWER_SUPPLY_TYPEC_SOURCE_HIGH;
 	case SNK_RP_SHORT_BIT:
 		return POWER_SUPPLY_TYPEC_NON_COMPLIANT;
-	case SNK_DAM_500MA_BIT:
-	case SNK_DAM_1500MA_BIT:
-	case SNK_DAM_3000MA_BIT:
-		return POWER_SUPPLY_TYPEC_SINK_DEBUG_ACCESSORY;
+	// case SNK_DAM_500MA_BIT:
+	// case SNK_DAM_1500MA_BIT:
+	// case SNK_DAM_3000MA_BIT:
+		// return POWER_SUPPLY_TYPEC_SINK_DEBUG_ACCESSORY;
 	default:
 		break;
 	}
@@ -5612,6 +5621,10 @@ void smblib_usb_plugin_locked(struct smb_charger *chg)
 			smblib_err(chg, "Couldn't disable DPDM rc=%d\n", rc);
 
 		smblib_update_usb_type(chg);
+
+		if(chg->use_extcon)
+		   smblib_notify_device_mode(chg,false);
+        vote(chg->usb_icl_votable, USB_PSY_VOTER,false, 0);//remove USB_PSY voting when plugin  detach
 	}
 
 	if (chg->connector_type == POWER_SUPPLY_CONNECTOR_MICRO_USB)
@@ -5760,6 +5773,7 @@ static void update_sw_icl_max(struct smb_charger *chg, int pst)
 
 	/* TypeC rp med or high, use rp value */
 	typec_mode = smblib_get_prop_typec_mode(chg);
+
 	if (typec_rp_med_high(chg, typec_mode)) {
 		rp_ua = get_rp_based_dcp_current(chg, typec_mode);
 		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, true, rp_ua);
@@ -5814,7 +5828,6 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 		return;
 
 	apsd_result = smblib_update_usb_type(chg);
-
 	update_sw_icl_max(chg, apsd_result->pst);
 
 	switch (apsd_result->bit) {
@@ -6380,7 +6393,6 @@ static void smblib_handle_rp_change(struct smb_charger *chg, int typec_mode)
 					== FORCE_FLOAT_SDP_CFG_BIT)
 			return;
 	}
-
 	update_sw_icl_max(chg, apsd->pst);
 
 	smblib_dbg(chg, PR_MISC, "CC change old_mode=%d new_mode=%d\n",
